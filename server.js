@@ -272,10 +272,31 @@ io.on('connection', (socket) => {
 
         const aiGreeting = firstMessage.choices[0].message.content;
 
-        activeConversations.get(sessionId).history.push({
-            role: 'assistant',
-            content: aiGreeting
-        });
+        if (activeConversations.get(sessionId)) {
+            activeConversations.get(sessionId).history.push({
+                role: 'user',
+                content: aiGreeting
+            });
+        } else {
+            activeConversations.set(sessionId, {
+                history: [
+                    {
+                        role: 'user',
+                        content: aiGreeting
+                    }
+                ],
+                sessionData: {
+                    userName: null,
+                    phone: null,
+                    serviceType: null,
+                    proposedDate: null,
+                    proposedTime: null,
+                    vehicleInfo: null,
+                    confirmed: false
+                },
+                startTime: new Date()
+            });
+        }
 
         socket.emit('assistant-message', {
             text: aiGreeting,

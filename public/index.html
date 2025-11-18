@@ -111,14 +111,10 @@
         }
 
         @keyframes blink {
-
-            0%,
-            49% {
+            0%, 49% {
                 opacity: 1;
             }
-
-            50%,
-            100% {
+            50%, 100% {
                 opacity: 0;
             }
         }
@@ -259,6 +255,11 @@
         let currentUserMessageElement = null;
         let voicesLoaded = false;
         let availableVoices = [];
+        
+        // NEW: Track speech state to prevent duplicates
+        let isSpeaking = false;
+        let currentSpeechId = null;
+        let speechTimeoutId = null;
 
         // iOS-specific: Initialize voices on page load
         function initVoices() {
@@ -270,7 +271,6 @@
                     console.log('✓ Voices loaded:', availableVoices.length);
                     resolve();
                 } else {
-                    // iOS requires this event listener
                     speechSynthesis.addEventListener('voiceschanged', () => {
                         availableVoices = speechSynthesis.getVoices();
                         voicesLoaded = true;
@@ -278,7 +278,6 @@
                         resolve();
                     }, { once: true });
                     
-                    // Fallback timeout for iOS
                     setTimeout(() => {
                         availableVoices = speechSynthesis.getVoices();
                         voicesLoaded = true;
@@ -288,7 +287,6 @@
             });
         }
 
-        // Initialize voices when page loads
         window.addEventListener('load', () => {
             initVoices();
         });
@@ -313,11 +311,23 @@
             });
 
             socket.on('assistant-message', async (data) => {
+                // FIXED: Check if call is still active before processing
+                if (!isCallActive || stopAllActivity) {
+                    console.log('⚠️ Call inactive, ignoring message');
+                    return;
+                }
+
+                // FIXED: Generate unique ID for this message to prevent duplicates
+                const messageId = Date.now() + Math.random();
+                console.log('📨 New assistant message:', messageId);
+
                 const messageElement = createStreamingMessage(data.text, 'assistant');
 
+                // FIXED: Run in parallel - speak and type at the same time
                 const typewriterPromise = typewriterEffect(messageElement, data.text);
-                const ttsPromise = speakText(data.text);
+                const ttsPromise = speakText(data.text, messageId);
 
+                // Wait for both to complete
                 await Promise.all([typewriterPromise, ttsPromise]);
 
                 if (data.sessionData) {
@@ -334,7 +344,10 @@
                     addStatus('Call ending...');
                     setTimeout(() => hangupCall(), 2000);
                 } else {
-                    setTimeout(() => startListening(), 500);
+                    // FIXED: Only start listening if call is still active
+                    if (isCallActive && !stopAllActivity && !isSpeaking) {
+                        setTimeout(() => startListening(), 500);
+                    }
                 }
             });
 
@@ -353,12 +366,10 @@
             try {
                 stopAllActivity = false;
                 
-                // iOS: Ensure voices are loaded before starting
                 if (!voicesLoaded) {
                     await initVoices();
                 }
                 
-                // iOS: Prime the speech synthesis with user interaction
                 const utterance = new SpeechSynthesisUtterance('');
                 speechSynthesis.speak(utterance);
                 speechSynthesis.cancel();
@@ -380,7 +391,10 @@
         }
 
         async function startListening() {
-            if (!isCallActive || isRecording) return;
+            if (!isCallActive || isRecording || isSpeaking) {
+                console.log('⚠️ Cannot start listening:', { isCallActive, isRecording, isSpeaking });
+                return;
+            }
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -540,7 +554,7 @@
                 element.innerHTML = '<span class="typing-cursor"></span>';
 
                 function typeNextChar() {
-                    if (stopAllActivity) {
+                    if (stopAllActivity || !isCallActive) {
                         const cursor = element.querySelector('.typing-cursor');
                         if (cursor) cursor.remove();
                         return resolve();
@@ -570,60 +584,104 @@
             });
         }
 
-        function speakText(text) {
+        // FIXED: Complete rewrite of speakText to prevent duplicates and ensure cancellation
+        function speakText(text, messageId) {
             return new Promise((resolve) => {
-                // iOS: Cancel any existing speech
+                // FIXED: Check if already speaking or call inactive
+                if (isSpeaking || !isCallActive || stopAllActivity) {
+                    console.log('⚠️ Skipping speech:', { isSpeaking, isCallActive, stopAllActivity });
+                    return resolve();
+                }
+
+                // FIXED: Mark as speaking and store message ID
+                isSpeaking = true;
+                currentSpeechId = messageId;
+                console.log('🔊 Starting speech for message:', messageId);
+
+                // FIXED: Cancel any existing speech first
                 speechSynthesis.cancel();
                 
-                // iOS: Small delay to ensure cancel completes
+                // FIXED: Clear any existing timeout
+                if (speechTimeoutId) {
+                    clearTimeout(speechTimeoutId);
+                    speechTimeoutId = null;
+                }
+
                 setTimeout(() => {
+                    // FIXED: Double-check call is still active
+                    if (!isCallActive || stopAllActivity) {
+                        console.log('⚠️ Call ended before speech started');
+                        isSpeaking = false;
+                        return resolve();
+                    }
+
                     const utterance = new SpeechSynthesisUtterance(text);
                     utterance.lang = 'en-US';
                     utterance.rate = 0.95;
                     utterance.pitch = 1.0;
                     utterance.volume = 1.0;
 
-                    // iOS: Use already loaded voices
                     if (availableVoices.length === 0) {
                         availableVoices = speechSynthesis.getVoices();
                     }
                     
                     selectVoice(utterance, availableVoices);
-                    
-                    console.log('🔊 Speaking with voice:', utterance.voice ? utterance.voice.name : 'default');
 
-                    // iOS: Handle speech events
                     utterance.onstart = () => {
-                        console.log('🔊 Speech started');
+                        console.log('🔊 Speech started for:', messageId);
                     };
 
                     utterance.onend = () => {
-                        console.log('✓ Speech ended');
+                        console.log('✓ Speech ended for:', messageId);
+                        isSpeaking = false;
+                        currentSpeechId = null;
+                        if (speechTimeoutId) {
+                            clearTimeout(speechTimeoutId);
+                            speechTimeoutId = null;
+                        }
                         resolve();
                     };
 
                     utterance.onerror = (error) => {
-                        console.error('TTS error:', error);
-                        // iOS: Retry once on error
-                        if (error.error === 'interrupted' || error.error === 'cancelled') {
+                        console.error('TTS error:', error.error, 'for message:', messageId);
+                        
+                        // FIXED: Only retry on specific errors, and only if call is active
+                        if ((error.error === 'interrupted' || error.error === 'cancelled') && 
+                            isCallActive && !stopAllActivity && currentSpeechId === messageId) {
+                            console.log('🔄 Retrying speech once...');
                             setTimeout(() => {
-                                speechSynthesis.speak(utterance);
+                                if (isCallActive && !stopAllActivity) {
+                                    speechSynthesis.speak(utterance);
+                                } else {
+                                    isSpeaking = false;
+                                    resolve();
+                                }
                             }, 100);
                         } else {
+                            isSpeaking = false;
+                            currentSpeechId = null;
                             resolve();
                         }
                     };
 
-                    // iOS: Speak the utterance
-                    speechSynthesis.speak(utterance);
-                    
-                    // iOS: Fallback timeout (30 seconds max)
-                    setTimeout(() => {
-                        if (speechSynthesis.speaking) {
-                            speechSynthesis.cancel();
-                        }
+                    // FIXED: Speak only if still active
+                    if (isCallActive && !stopAllActivity) {
+                        speechSynthesis.speak(utterance);
+                        
+                        // FIXED: Safety timeout - cancel after 30 seconds
+                        speechTimeoutId = setTimeout(() => {
+                            if (speechSynthesis.speaking) {
+                                console.log('⏱️ Speech timeout, cancelling...');
+                                speechSynthesis.cancel();
+                            }
+                            isSpeaking = false;
+                            currentSpeechId = null;
+                            resolve();
+                        }, 30000);
+                    } else {
+                        isSpeaking = false;
                         resolve();
-                    }, 30000);
+                    }
                 }, 100);
             });
         }
@@ -634,26 +692,10 @@
                 return;
             }
 
-            // iOS-specific voice names
-            const iosVoices = [
-                'Samantha',
-                'Karen',
-                'Victoria',
-                'Susan',
-                'Moira'
-            ];
-
-            // Android/Chrome voice names
-            const androidVoices = [
-                'Google US English',
-                'Microsoft Zira',
-                'English United States'
-            ];
-
-            // Combined list
+            const iosVoices = ['Samantha', 'Karen', 'Victoria', 'Susan', 'Moira'];
+            const androidVoices = ['Google US English', 'Microsoft Zira', 'English United States'];
             const preferredNames = [...iosVoices, ...androidVoices];
 
-            // Try to find preferred voice
             for (let name of preferredNames) {
                 const voice = voices.find(v => v.name.includes(name));
                 if (voice) {
@@ -663,7 +705,6 @@
                 }
             }
 
-            // Fallback: Find any English voice
             const enVoice = voices.find(v => 
                 v.lang.startsWith('en-') || 
                 v.lang === 'en_US' || 
@@ -678,23 +719,43 @@
             }
         }
 
+        // FIXED: Improved hangupCall to stop everything immediately
         function hangupCall() {
+            console.log('📵 Hanging up call...');
+            
+            // FIXED: Set flags first to prevent new operations
             stopAllActivity = true;
+            isCallActive = false;
+            isSpeaking = false;
+            currentSpeechId = null;
+            
+            // FIXED: Clear all timeouts
             if (currentTypingTimeout) {
                 clearTimeout(currentTypingTimeout);
                 currentTypingTimeout = null;
             }
+            
+            if (speechTimeoutId) {
+                clearTimeout(speechTimeoutId);
+                speechTimeoutId = null;
+            }
 
+            // FIXED: Stop speech immediately
+            if (speechSynthesis.speaking) {
+                speechSynthesis.cancel();
+            }
+
+            // FIXED: Stop recording
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+            }
+
+            // FIXED: Disconnect socket
             if (socket) {
                 socket.emit('end-conversation');
                 socket.disconnect();
             }
 
-            if (mediaRecorder && isRecording) {
-                mediaRecorder.stop();
-            }
-
-            speechSynthesis.cancel();
             resetUI();
             addStatus('Call ended. Thank you!');
         }
@@ -702,6 +763,8 @@
         function resetUI() {
             isCallActive = false;
             isRecording = false;
+            isSpeaking = false;
+            currentSpeechId = null;
             currentUserMessageElement = null;
             document.getElementById('startBtn').style.display = 'flex';
             document.getElementById('stopBtn').style.display = 'none';
