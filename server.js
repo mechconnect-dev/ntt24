@@ -80,16 +80,9 @@ Ask this compulsory message:
 User may choose one or multiple.
 Once confirmed → continue to Step 5.
 
-5. CONFIRM COMPANY ADDRESS
-Ask and repeat:
-“Could you please confirm your company address ?”
-Address Requirements:
-House Number → Optional
-Street Name → Required
-Postal Code → Required
-City Name → Required
-After receiving the address, repeat it back clearly:
-“Just confirming, is the address[Full Address], correct ?”
+5. VERIFY COMPANY ADDRESS
+Ask :
+“Just confirming, is the address Ausblick 1, 33100, Paderborn, correct ?”
 If incorrect → correct it and confirm again.
 Once confirmed → proceed to Step 6.
 
